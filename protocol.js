@@ -5,6 +5,7 @@
 export const SERVICE_UUID = '5459b00d-7a1d-4c3e-9a55-000000005459';
 export const RX_UUID      = '5459b00d-7a1d-4c3e-9a55-0000000000a1';
 export const TX_UUID      = '5459b00d-7a1d-4c3e-9a55-0000000000a2';
+export const NONCE_UUID   = '5459b00d-7a1d-4c3e-9a55-0000000000a3';
 export const FRAME        = 180;
 
 // TBA matches -> compact rows: [key, level, set, number, time, predicted, actual, post_result,
@@ -42,9 +43,30 @@ async function deflate(bytes) {
   return new Uint8Array(await new Response(out).arrayBuffer());
 }
 
-// A message -> the frames to write, in order.
-export async function frames(obj, msgId) {
-  const body = await deflate(new TextEncoder().encode(JSON.stringify(obj)));
+// The passcode -> the signing key: SHA-256("pitboard-link:" + capitals and digits only).
+export async function keyFor(code) {
+  const norm = (code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const raw = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('pitboard-link:' + norm));
+  return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+}
+
+// HMAC-SHA256(key, nonce + body): what the board checks every message with.
+async function sign(key, nonce, body) {
+  const both = new Uint8Array(nonce.length + body.length);
+  both.set(nonce, 0); both.set(body, nonce.length);
+  return new Uint8Array(await crypto.subtle.sign('HMAC', key, both));
+}
+
+// A message -> the frames to write, in order. With a key (keyFor) and the board's current nonce
+// (read from NONCE_UUID just before), it's signed; the board ignores messages that aren't.
+export async function frames(obj, msgId, key = null, nonce = new Uint8Array(0)) {
+  let body = await deflate(new TextEncoder().encode(JSON.stringify(obj)));
+  if (key) {
+    const tag = await sign(key, nonce, body);
+    const signed = new Uint8Array(tag.length + body.length);
+    signed.set(tag, 0); signed.set(body, tag.length);
+    body = signed;
+  }
   const size = FRAME - 4, out = [];
   const n = Math.max(1, Math.ceil(body.length / size));
   for (let k = 0; k < n; k++) {

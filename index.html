@@ -63,6 +63,7 @@
 
 <section>
   <h2>Settings (kept on this phone)</h2>
+  <label for="boardCode">Board code (on the board: Y &rarr; PHONE CODE)</label><input id="boardCode" autocomplete="off" autocapitalize="characters" placeholder="XXXX-XXXX-XXXX">
   <label for="team">Team</label><input id="team" inputmode="numeric" value="5459">
   <label for="tbaKey">The Blue Alliance read key</label><input id="tbaKey" autocomplete="off">
   <label for="nexusKey">Nexus key (optional)</label><input id="nexusKey" autocomplete="off">
@@ -71,16 +72,16 @@
 <section><h2>Log</h2><div id="status"></div></section>
 
 <script type="module">
-import { SERVICE_UUID, RX_UUID, TX_UUID, compactMatches, compactRankings, compactEvent, frames } from './protocol.js';
+import { SERVICE_UUID, RX_UUID, TX_UUID, NONCE_UUID, compactMatches, compactRankings, compactEvent, frames, keyFor } from './protocol.js';
 
 const $ = id => document.getElementById(id);
 const log = s => { $('status').textContent = `${new Date().toLocaleTimeString()}  ${s}\n` + $('status').textContent.slice(0, 3000); };
-for (const k of ['team', 'tbaKey', 'nexusKey']) {
+for (const k of ['team', 'tbaKey', 'nexusKey', 'boardCode']) {
   $(k).value = localStorage.getItem(k) ?? $(k).value;
   $(k).addEventListener('change', () => localStorage.setItem(k, $(k).value.trim()));
 }
 
-let rx = null, msgId = 0, timer = null, events = [];
+let rx = null, nonceCh = null, msgId = 0, timer = null, events = [];
 
 $('connect').onclick = async () => {
   if (!navigator.bluetooth) { log('No Web Bluetooth here: use Chrome on Android, or Bluefy on iPhone'); return; }
@@ -90,6 +91,7 @@ $('connect').onclick = async () => {
     const gatt = await dev.gatt.connect();
     const svc = await gatt.getPrimaryService(SERVICE_UUID);
     rx = await svc.getCharacteristic(RX_UUID);
+    nonceCh = await svc.getCharacteristic(NONCE_UUID);
     const tx = await svc.getCharacteristic(TX_UUID);
     const show = v => { const s = new TextDecoder().decode(v); $('board').textContent = s; };
     try { await tx.startNotifications(); tx.addEventListener('characteristicvaluechanged', e => show(e.target.value)); } catch (e) {}
@@ -101,7 +103,10 @@ $('connect').onclick = async () => {
 
 async function send(obj) {
   if (!rx) { log('not connected'); return false; }
-  const fs = await frames(obj, msgId = (msgId + 1) & 255);
+  if (!$('boardCode').value.trim()) { log('enter the board code (Settings) -- Y on the board, PHONE CODE shows it'); return false; }
+  // sign it for the board's current challenge: read it fresh every time (it changes after each message)
+  const nonce = new Uint8Array((await nonceCh.readValue()).buffer);
+  const fs = await frames(obj, msgId = (msgId + 1) & 255, await keyFor($('boardCode').value), nonce);
   for (const f of fs) await rx.writeValueWithResponse(f);
   log(`sent ${obj.type} (${fs.length} frames)`);
   return true;
