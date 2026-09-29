@@ -57,6 +57,20 @@ async function sign(key, nonce, body) {
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, both));
 }
 
+// Encrypt a secret (the Wi-Fi password) for the board: XOR with HMAC-SHA256(key, "wifi" + nonce +
+// block number) blocks -- the passcode key and the same one-use nonce the message is signed with.
+export async function crypt(key, nonce, bytes) {
+  const out = new Uint8Array(bytes.length);
+  for (let k = 0, off = 0; off < bytes.length; k++, off += 32) {
+    const seed = new Uint8Array(4 + nonce.length + 4);
+    seed.set(new TextEncoder().encode('wifi'), 0); seed.set(nonce, 4);
+    new DataView(seed.buffer).setUint32(4 + nonce.length, k);
+    const block = new Uint8Array(await crypto.subtle.sign('HMAC', key, seed));
+    for (let i = 0; i < 32 && off + i < bytes.length; i++) out[off + i] = bytes[off + i] ^ block[i];
+  }
+  return out;
+}
+
 // A message -> the frames to write, in order. With a key (keyFor) and the board's current nonce
 // (read from NONCE_UUID just before), it's signed; the board ignores messages that aren't.
 export async function frames(obj, msgId, key = null, nonce = new Uint8Array(0)) {

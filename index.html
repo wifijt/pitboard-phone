@@ -62,6 +62,18 @@
 </section>
 
 <section>
+  <h2>Board Wi-Fi</h2>
+  <label for="ssid">Network name</label><input id="ssid" autocomplete="off" autocapitalize="off">
+  <label for="wifiUser">Username (school / enterprise networks only)</label><input id="wifiUser" autocomplete="off" autocapitalize="off">
+  <label for="wifiPass">Password</label><input id="wifiPass" type="password" autocomplete="off">
+  <div class="row">
+    <button id="wifiAdd">Add</button>
+    <button class="quiet" id="wifiForget">Forget</button>
+    <button class="quiet" id="wifiCheck">Check</button>
+  </div>
+</section>
+
+<section>
   <h2>Settings (kept on this phone)</h2>
   <label for="boardCode">Board code (on the board: Y &rarr; PHONE CODE)</label><input id="boardCode" autocomplete="off" autocapitalize="characters" placeholder="XXXX-XXXX-XXXX">
   <label for="team">Team</label><input id="team" inputmode="numeric" value="5459">
@@ -72,7 +84,7 @@
 <section><h2>Log</h2><div id="status"></div></section>
 
 <script type="module">
-import { SERVICE_UUID, RX_UUID, TX_UUID, NONCE_UUID, compactMatches, compactRankings, compactEvent, frames, keyFor } from './protocol.js';
+import { SERVICE_UUID, RX_UUID, TX_UUID, NONCE_UUID, compactMatches, compactRankings, compactEvent, frames, keyFor, crypt } from './protocol.js';
 
 const $ = id => document.getElementById(id);
 const log = s => { $('status').textContent = `${new Date().toLocaleTimeString()}  ${s}\n` + $('status').textContent.slice(0, 3000); };
@@ -101,12 +113,17 @@ $('connect').onclick = async () => {
   } catch (e) { log(`connect: ${e.message}`); }
 };
 
-async function send(obj) {
+async function send(obj, secret = null) {
   if (!rx) { log('not connected'); return false; }
   if (!$('boardCode').value.trim()) { log('enter the board code (Settings) -- Y on the board, PHONE CODE shows it'); return false; }
   // sign it for the board's current challenge: read it fresh every time (it changes after each message)
   const nonce = new Uint8Array((await nonceCh.readValue()).buffer);
-  const fs = await frames(obj, msgId = (msgId + 1) & 255, await keyFor($('boardCode').value), nonce);
+  const key = await keyFor($('boardCode').value);
+  if (secret !== null) {            // the Wi-Fi password: encrypted, never sent as it is
+    const enc = await crypt(key, nonce, new TextEncoder().encode(secret));
+    obj = { ...obj, secret: Array.from(enc, b => b.toString(16).padStart(2, '0')).join('') };
+  }
+  const fs = await frames(obj, msgId = (msgId + 1) & 255, key, nonce);
   for (const f of fs) await rx.writeValueWithResponse(f);
   log(`sent ${obj.type} (${fs.length} frames)`);
   return true;
@@ -170,6 +187,16 @@ $('event').onchange = () => send({ type: 'pin', event: $('event').value || null 
 $('sendMsg').onclick = () => send({ type: 'message', text: $('msg').value, secs: 30 });
 $('clearMsg').onclick = () => send({ type: 'message', text: '', secs: 0 });    // down now
 $('event').onfocus = () => { if (!events.length) loadEvents().catch(e => log(e.message)); };
+// Wi-Fi: the board saves the network and joins it whenever it's in range; the password goes encrypted
+$('wifiAdd').onclick = async () => {
+  if (!$('ssid').value.trim()) { log('network name?'); return; }
+  await send({ type: 'wifi', action: 'add', ssid: $('ssid').value.trim(), identity: $('wifiUser').value.trim() || null },
+             $('wifiPass').value);
+  $('wifiPass').value = '';
+  setTimeout(() => $('wifiCheck').onclick(), 6000);            // then see how it went
+};
+$('wifiForget').onclick = () => send({ type: 'wifi', action: 'forget', ssid: $('ssid').value.trim() });
+$('wifiCheck').onclick = () => send({ type: 'wifi', action: 'status' });
 </script>
 </body>
 </html>
