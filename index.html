@@ -58,7 +58,7 @@
     <button class="quiet" id="clearField">Clear</button>
   </div>
   <label for="msg">A message on the panel</label>
-  <div class="row"><input id="msg" placeholder="Robot to the practice field!"><button id="sendMsg" style="flex:0 0 auto">Show</button></div>
+  <div class="row"><input id="msg" placeholder="Robot to the practice field!"><button id="sendMsg" style="flex:0 0 auto">Show</button><button class="quiet" id="clearMsg" style="flex:0 0 auto">Clear</button></div>
 </section>
 
 <section>
@@ -163,6 +163,7 @@ $('setField').onclick = () => send({ type: 'override', field: $('field').value.t
 $('clearField').onclick = () => send({ type: 'override', field: null });
 $('event').onchange = () => send({ type: 'pin', event: $('event').value || null });
 $('sendMsg').onclick = () => send({ type: 'message', text: $('msg').value, secs: 30 });
+$('clearMsg').onclick = () => send({ type: 'message', text: '', secs: 0 });    // down now
 $('event').onfocus = () => { if (!events.length) loadEvents().catch(e => log(e.message)); };
 </script>
 </body>
