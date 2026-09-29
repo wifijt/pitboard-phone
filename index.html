@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pit Board Link</title>
+<!-- The phone side of the pit board's Bluetooth link (pitboard/link.py). Chrome on Android, or
+     the Bluefy browser on an iPhone (Safari has no Web Bluetooth). The phone fetches The Blue
+     Alliance (and Nexus) on its own cellular data and writes the event to the board. -->
+<style>
+  :root { --bg: #111; --fg: #eee; --dim: #999; --tiger: #ff8200; --card: #1d1d1f; --line: #333; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+         font: 16px/1.4 -apple-system, system-ui, sans-serif; max-width: 520px; }
+  h1 { font-size: 20px; margin: 0 0 12px; color: var(--tiger); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 0 0 12px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 0 0 8px; }
+  label { display: block; font-size: 13px; color: var(--dim); margin: 6px 0 2px; }
+  input, select { width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; border-radius: 8px;
+                  border: 1px solid var(--line); background: #000; color: var(--fg); }
+  button { font-size: 16px; padding: 12px 14px; border-radius: 8px; border: 0; background: var(--tiger);
+           color: #000; font-weight: 600; margin: 8px 8px 0 0; }
+  button.quiet { background: #333; color: var(--fg); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  #status { font-family: ui-monospace, monospace; font-size: 13px; white-space: pre-wrap; color: var(--dim); }
+  .ok { color: #6e6; } .bad { color: #f66; }
+</style>
+</head>
+<body>
+<h1>Pit Board Link</h1>
+
+<section>
+  <h2>Board</h2>
+  <button id="connect">Connect to the board</button>
+  <div id="board" class="bad">not connected</div>
+</section>
+
+<section>
+  <h2>Event data</h2>
+  <div class="row">
+    <button id="send">Send now</button>
+    <label style="flex:0 0 auto"><input type="checkbox" id="auto" style="width:auto"> every minute</label>
+  </div>
+  <label for="event">Event</label>
+  <select id="event"><option value="">(today's, or the next)</option></select>
+</section>
+
+<section>
+  <h2>By hand</h2>
+  <label>The field is on</label>
+  <div class="row">
+    <button class="quiet" id="minus">&minus;</button>
+    <input id="field" placeholder="Q12" style="text-align:center">
+    <button class="quiet" id="plus">+</button>
+  </div>
+  <div class="row">
+    <button id="setField">Set</button>
+    <button class="quiet" id="clearField">Clear</button>
+  </div>
+  <label for="msg">A message on the panel</label>
+  <div class="row"><input id="msg" placeholder="Robot to the practice field!"><button id="sendMsg" style="flex:0 0 auto">Show</button></div>
+</section>
+
+<section>
+  <h2>Settings (kept on this phone)</h2>
+  <label for="team">Team</label><input id="team" inputmode="numeric" value="5459">
+  <label for="tbaKey">The Blue Alliance read key</label><input id="tbaKey" autocomplete="off">
+  <label for="nexusKey">Nexus key (optional)</label><input id="nexusKey" autocomplete="off">
+</section>
+
+<section><h2>Log</h2><div id="status"></div></section>
+
+<script type="module">
+import { SERVICE_UUID, RX_UUID, TX_UUID, compactMatches, compactRankings, compactEvent, frames } from './protocol.js';
+
+const $ = id => document.getElementById(id);
+const log = s => { $('status').textContent = `${new Date().toLocaleTimeString()}  ${s}\n` + $('status').textContent.slice(0, 3000); };
+for (const k of ['team', 'tbaKey', 'nexusKey']) {
+  $(k).value = localStorage.getItem(k) ?? $(k).value;
+  $(k).addEventListener('change', () => localStorage.setItem(k, $(k).value.trim()));
+}
+
+let rx = null, msgId = 0, timer = null, events = [];
+
+$('connect').onclick = async () => {
+  if (!navigator.bluetooth) { log('No Web Bluetooth here: use Chrome on Android, or Bluefy on iPhone'); return; }
+  try {
+    const dev = await navigator.bluetooth.requestDevice({ filters: [{ services: [SERVICE_UUID] }] });
+    dev.addEventListener('gattserverdisconnected', () => { rx = null; $('board').textContent = 'disconnected'; $('board').className = 'bad'; });
+    const gatt = await dev.gatt.connect();
+    const svc = await gatt.getPrimaryService(SERVICE_UUID);
+    rx = await svc.getCharacteristic(RX_UUID);
+    const tx = await svc.getCharacteristic(TX_UUID);
+    const show = v => { const s = new TextDecoder().decode(v); $('board').textContent = s; };
+    try { await tx.startNotifications(); tx.addEventListener('characteristicvaluechanged', e => show(e.target.value)); } catch (e) {}
+    show(await tx.readValue());
+    $('board').className = 'ok';
+    log(`connected to ${dev.name}`);
+  } catch (e) { log(`connect: ${e.message}`); }
+};
+
+async function send(obj) {
+  if (!rx) { log('not connected'); return false; }
+  const fs = await frames(obj, msgId = (msgId + 1) & 255);
+  for (const f of fs) await rx.writeValueWithResponse(f);
+  log(`sent ${obj.type} (${fs.length} frames)`);
+  return true;
+}
+
+async function tba(path) {
+  const r = await fetch('https://www.thebluealliance.com/api/v3/' + path, { headers: { 'X-TBA-Auth-Key': $('tbaKey').value.trim() } });
+  if (!r.ok) throw new Error(`TBA ${r.status} for ${path}`);
+  return r.json();
+}
+
+async function loadEvents() {
+  const year = new Date().getFullYear();
+  events = (await tba(`team/frc${$('team').value.trim()}/events/${year}/simple`)).sort((a, b) => a.start_date < b.start_date ? -1 : 1);
+  const sel = $('event'), keep = sel.value;
+  sel.innerHTML = '<option value="">(today\'s, or the next)</option>' +
+    events.map(e => `<option value="${e.key}">${e.start_date}  ${e.short_name || e.name}</option>`).join('');
+  sel.value = keep;
+}
+
+function pick() {
+  if ($('event').value) return events.find(e => e.key === $('event').value);
+  const today = new Date().toISOString().slice(0, 10);
+  return events.find(e => e.start_date <= today && today <= e.end_date) || events.find(e => e.start_date >= today);
+}
+
+$('send').onclick = async () => {
+  try {
+    if (!events.length) await loadEvents();
+    const ev = pick();
+    if (!ev) { log('no event this season'); return; }
+    const [matches, rankings] = await Promise.all([tba(`event/${ev.key}/matches`), tba(`event/${ev.key}/rankings`).catch(() => null)]);
+    let nexus = null;
+    if ($('nexusKey').value.trim()) {
+      try {
+        const r = await fetch(`https://frc.nexus/api/v1/event/${ev.key}`, { headers: { 'Nexus-Api-Key': $('nexusKey').value.trim() } });
+        if (r.ok) nexus = await r.json();
+      } catch (e) { log(`nexus: ${e.message}`); }
+    }
+    await send({ type: 'data', event: compactEvent(ev), matches: compactMatches(matches),
+                 rankings: compactRankings(rankings), nexus, at: Date.now() / 1000 });
+    const labels = matches.filter(m => m.comp_level === 'qm').sort((a, b) => a.match_number - b.match_number).map(m => `Q${m.match_number}`);
+    if (!$('field').value && labels.length) $('field').value = labels[0];
+  } catch (e) { log(e.message); }
+};
+
+$('auto').onchange = () => {
+  clearInterval(timer);
+  if ($('auto').checked) { $('send').onclick(); timer = setInterval(() => $('send').onclick(), 60000); }
+};
+
+const step = d => {
+  const m = /^([A-Z]+)(\d+)$/i.exec($('field').value.trim()) || [0, 'Q', '1'];
+  $('field').value = `${m[1].toUpperCase()}${Math.max(1, parseInt(m[2], 10) + d)}`;
+};
+$('minus').onclick = () => step(-1);
+$('plus').onclick = () => step(+1);
+$('setField').onclick = () => send({ type: 'override', field: $('field').value.trim().toUpperCase() });
+$('clearField').onclick = () => send({ type: 'override', field: null });
+$('event').onchange = () => send({ type: 'pin', event: $('event').value || null });
+$('sendMsg').onclick = () => send({ type: 'message', text: $('msg').value, secs: 30 });
+$('event').onfocus = () => { if (!events.length) loadEvents().catch(e => log(e.message)); };
+</script>
+</body>
+</html>
